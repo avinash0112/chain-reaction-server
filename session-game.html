@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Game Lobby</title>
+  <script src="https://cdn.socket.io/4.0.1/socket.io.min.js"></script>
+</head>
+<body>
+  <h1>Game Lobby</h1>
+  <div>
+    <button onclick="createGame()">Create Game</button>
+    <button onclick="joinGame()">Join Game</button>
+  </div>
+
+  <div id="status"></div>
+  <div id="game-actions">
+    <button id="actionBtn" onclick="sendAction()">Send Action</button>
+  </div>
+
+  <script>
+    const socket = io('http://localhost:3000');
+    let currentGameId = null;
+
+    // Create a new game session
+    function createGame() {
+      const gameId = prompt('Enter Game ID to create:');
+      if (gameId) {
+        socket.emit('create_game', gameId);
+      }
+    }
+
+    // Join an existing game session
+    function joinGame() {
+      const gameId = prompt('Enter Game ID to join:');
+      if (gameId) {
+        socket.emit('join_game', gameId);
+      }
+    }
+
+    // Handle game creation response
+    socket.on('game_created', (gameId) => {
+      currentGameId = gameId;
+      document.getElementById('status').textContent = `Game ${gameId} created. Waiting for another player...`;
+    });
+
+    // Handle game joining response
+    socket.on('game_joined', (gameId) => {
+      currentGameId = gameId;
+      document.getElementById('status').textContent = `Joined game ${gameId}. The game is starting!`;
+    });
+
+    // Handle game updates
+    socket.on('game_update', (action) => {
+      document.getElementById('status').textContent = `Game action: ${action}`;
+    });
+
+    // Handle player left event
+    socket.on('player_left', (playerId) => {
+      document.getElementById('status').textContent = `Player ${playerId} left the game.`;
+    });
+
+    // Send a game action
+    function sendAction() {
+      if (currentGameId) {
+        const action = prompt('Enter action for the game:');
+        socket.emit('game_action', currentGameId, action);
+      }
+    }
+  </script>
+</body>
+</html>
