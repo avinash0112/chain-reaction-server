@@ -1,13 +1,14 @@
 const { Server } = require("socket.io");
-const { handleGameStateUpdate } = require("../services/gameService.js");
+const {
+  handleGameStateUpdate,
+  getInitialGameBoardState,
+} = require("../services/gameService.js");
 
 const sessions = {}; // Game sessions
 const connectedUsers = new Set();
 const GRID_SIZE = 6;
 
-let gameState = Array(GRID_SIZE)
-  .fill()
-  .map(() => Array(GRID_SIZE).fill({ count: 0, player: null }));
+let gameState = getInitialGameBoardState(GRID_SIZE);
 
 const setupSocket = (server) => {
   const io = new Server(server, {
@@ -25,7 +26,7 @@ const setupSocket = (server) => {
     socket.emit("initialGameState", gameState);
 
     socket.on("cellClicked", (r, c) => {
-      gameState = handleGameStateUpdate(gameState, r, c);
+      gameState = handleGameStateUpdate(gameState, io, r, c);
       io.emit("gameUpdateByOther", gameState);
     });
 
