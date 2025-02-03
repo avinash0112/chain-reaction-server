@@ -18,10 +18,11 @@ app.use(express.json());
 
 const sessions = {}; // Object to store game sessions
 const connectedUsers = new Set();
+const GRID_SIZE = 6;
 
-let gameState = Array(6)
+let gameState = Array(GRID_SIZE)
   .fill()
-  .map(() => Array(6).fill({ count: 0, player: null }));
+  .map(() => Array(GRID_SIZE).fill({ count: 0, player: null }));
 
 io.on("connection", (socket) => {
   console.log(`User connected: ${socket.id}`);
