@@ -5,8 +5,10 @@ const {
 } = require("../services/gameService.js");
 
 const sessions = {}; // Game sessions
-const connectedUsers = new Set();
+const connectedUsers = [];
 const GRID_SIZE = 6;
+const PLAYER_COUNT = 2;
+let index = 0;
 
 let gameState = getInitialGameBoardState(GRID_SIZE);
 
@@ -20,14 +22,19 @@ const setupSocket = (server) => {
 
   io.on("connection", (socket) => {
     console.log(`🔗 User connected: ${socket.id}`);
-    connectedUsers.add(socket.id);
-    io.emit("userCount", connectedUsers.size);
+    if(!connectedUsers.includes(socket.id)) {
+       connectedUsers.push(socket.id);
+    }
+    io.emit("userCount", connectedUsers.length);
+    io.emit("activePlayer", connectedUsers[0]);
 
     socket.emit("initialGameState", gameState);
 
     socket.on("cellClicked", (r, c) => {
       gameState = handleGameStateUpdate(gameState, io, r, c);
       io.emit("gameUpdateByOther", gameState);
+      index++
+      io.emit("activePlayer", connectedUsers[index % PLAYER_COUNT]);
     });
 
     socket.on("createSession", (sessionName) => {
@@ -64,8 +71,8 @@ const setupSocket = (server) => {
     });
 
     socket.on("disconnect", () => {
-      connectedUsers.delete(socket.id);
-      io.emit("userCount", connectedUsers.size);
+      connectedUsers.splice(connectedUsers.indexOf(socket.id),1);
+      io.emit("userCount", connectedUsers.length);
       console.log(`❌ User disconnected: ${socket.id}`);
 
       for (const sessionName in sessions) {
@@ -73,6 +80,12 @@ const setupSocket = (server) => {
           (id) => id !== socket.id
         );
         io.to(sessionName).emit("playerLeft", sessions[sessionName].players);
+      }
+
+      if (connectedUsers.length > 0) {
+        // Set the next player as the active player
+        const newActivePlayerIndex = index % connectedUsers.length;
+        io.emit("activePlayer", connectedUsers[newActivePlayerIndex]);
       }
     });
   });
