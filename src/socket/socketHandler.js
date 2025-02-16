@@ -1,11 +1,15 @@
 const { Server } = require("socket.io");
 
 const Game = require("../services/Game.js");
+const Session = require("../services/Session.js");
 const sessions = {}; // Game sessions
 const connectedUsers = new Set();
 const GRID_SIZE = 6;
 
-const chainReactionGame = new Game(GRID_SIZE);
+// test session to keep one game instance running, to be removed.
+const chainReactionSession = new Session("test", GRID_SIZE);
+
+const chainReactionGame = chainReactionSession.getGame();
 let gameState = chainReactionGame.board;
 
 const setupSocket = (server) => {
@@ -32,8 +36,11 @@ const setupSocket = (server) => {
       if (sessions[sessionName]) {
         socket.emit("error", "Session name already exists.");
       } else {
-        sessions[sessionName] = { players: [socket.id] };
+        const session = new Session(sessionName, GRID_SIZE);
+        session.addPlayer(socket.id);
+        sessions[sessionName] = session;
         socket.join(sessionName);
+
         socket.emit("sessionCreated", sessionName);
         console.log(`🎮 Session created: ${sessionName}`);
       }
@@ -41,8 +48,9 @@ const setupSocket = (server) => {
 
     socket.on("joinSession", (sessionName) => {
       if (sessions[sessionName]) {
-        sessions[sessionName].players.push(socket.id);
+        sessions[sessionName].addPlayer(socket.id);
         socket.join(sessionName);
+
         io.to(sessionName).emit("playerJoined", sessions[sessionName].players);
         console.log(`👤 User ${socket.id} joined session ${sessionName}`);
       } else {
@@ -52,9 +60,7 @@ const setupSocket = (server) => {
 
     socket.on("leaveSession", (sessionName) => {
       if (sessions[sessionName]) {
-        sessions[sessionName].players = sessions[sessionName].players.filter(
-          (id) => id !== socket.id
-        );
+        sessions[sessionName].removePlayer(socket.id);
         socket.leave(sessionName);
         io.to(sessionName).emit("playerLeft", sessions[sessionName].players);
         console.log(`🚪 User ${socket.id} left session ${sessionName}`);
