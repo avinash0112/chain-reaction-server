@@ -30,6 +30,20 @@ class Session {
         (this.currentPlayerTurn + 1) % this.players.length;
     }
   }
+
+  isCurrentPlayerTurn(socId) {
+    return this.players[this.currentPlayerTurn] === socId;
+  }
+
+  getCurrentPlayer() {
+    return this.players[this.currentPlayerTurn];
+  }
+
+  getExceptCurrentPlayer() {
+    return this.players.filter((p, idx) => {
+      return idx === this.currentPlayerTurn;
+    });
+  }
 }
 
 module.exports = Session;

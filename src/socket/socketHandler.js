@@ -2,13 +2,15 @@ const { Server } = require("socket.io");
 
 const Game = require("../services/Game.js");
 const Session = require("../services/Session.js");
+const { addToTestSession } = require("./testSessionHandler.js");
 const sessions = {}; // Game sessions
 const connectedUsers = new Set();
 const GRID_SIZE = 6;
+const TEST_SESSION_NAME = "test";
 
 // test session to keep one game instance running, to be removed.
-const chainReactionSession = new Session("test", GRID_SIZE);
-
+const chainReactionSession = new Session(TEST_SESSION_NAME, GRID_SIZE);
+sessions[TEST_SESSION_NAME] = chainReactionSession;
 const chainReactionGame = chainReactionSession.getGame();
 let gameState = chainReactionGame.board;
 
@@ -25,11 +27,37 @@ const setupSocket = (server) => {
     connectedUsers.add(socket.id);
     io.emit("userCount", connectedUsers.size);
 
+    // Added all the joining clients into the "test" session for development
+    // process; should be removed.
+    // *--------------------------------------------------------------*
+    addToTestSession(
+      chainReactionSession,
+      socket,
+      io,
+      sessions,
+      TEST_SESSION_NAME
+    );
+    // *--------------------------------------------------------------*
     socket.emit("initialGameState", gameState);
 
+    if (chainReactionSession.isCurrentPlayerTurn(socket.id)) {
+      socket.emit("yourTurn", true);
+    }
+
     socket.on("cellClicked", (r, c) => {
-      chainReactionGame.handleMove(r, c, "P1", io);
-      io.emit("gameUpdateByOther", gameState);
+      if (chainReactionSession.isCurrentPlayerTurn(socket.id)) {
+        chainReactionGame.handleMove(r, c, "P1", io);
+        io.emit("gameUpdateByOther", gameState);
+        chainReactionSession.updatePlayerTurn();
+        // io.to(chainReactionSession.getCurrentPlayer()).emit("yourTurn", true);
+        // chainReactionSession.getExceptCurrentPlayer().forEach((p) => {
+        //   if (chainReactionSession.getCurrentPlayer() !== p) {
+        //     io.to(p).emit("yourTurn", false);
+        //   }
+        // });
+      } else {
+        // to be handled
+      }
     });
 
     socket.on("createSession", (sessionName) => {
@@ -62,7 +90,9 @@ const setupSocket = (server) => {
       if (sessions[sessionName]) {
         sessions[sessionName].removePlayer(socket.id);
         socket.leave(sessionName);
+        // io.to(sessionName)
         io.to(sessionName).emit("playerLeft", sessions[sessionName].players);
+
         console.log(`🚪 User ${socket.id} left session ${sessionName}`);
       }
     });
@@ -76,6 +106,8 @@ const setupSocket = (server) => {
         sessions[sessionName].players = sessions[sessionName].players.filter(
           (id) => id !== socket.id
         );
+        socket.leave(sessionName);
+        // io.to(sessionName).
         io.to(sessionName).emit("playerLeft", sessions[sessionName].players);
       }
     });
