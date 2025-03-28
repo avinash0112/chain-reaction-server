@@ -5,6 +5,7 @@ class Session {
     this.sessionName = sessionName;
     this.players = [];
     this.currentPlayerTurn = 0;
+    this.playerName = "P0";
     this.game = new Game(gameSize); // Default grid size
   }
 
@@ -28,6 +29,7 @@ class Session {
     if (this.players?.length) {
       this.currentPlayerTurn =
         (this.currentPlayerTurn + 1) % this.players.length;
+      this.playerName = `P${this.currentPlayerTurn}`;
     }
   }
 
@@ -37,6 +39,10 @@ class Session {
 
   getCurrentPlayer() {
     return this.players[this.currentPlayerTurn];
+  }
+
+  getCurrentPlayerName() {
+    return this.playerName;
   }
 
   getExceptCurrentPlayer() {

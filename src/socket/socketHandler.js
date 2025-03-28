@@ -46,7 +46,12 @@ const setupSocket = (server) => {
 
     socket.on("cellClicked", (r, c) => {
       if (chainReactionSession.isCurrentPlayerTurn(socket.id)) {
-        chainReactionGame.handleMove(r, c, "P1", io);
+        chainReactionGame.handleMove(
+          r,
+          c,
+          chainReactionSession.getCurrentPlayerName(),
+          io
+        );
         io.emit("gameUpdateByOther", gameState);
         chainReactionSession.updatePlayerTurn();
         // io.to(chainReactionSession.getCurrentPlayer()).emit("yourTurn", true);
