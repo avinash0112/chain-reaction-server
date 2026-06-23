@@ -1,5 +1,8 @@
 const { Server } = require("socket.io");
 const Session = require("../services/Session.js");
+const { createLogger } = require("../utils/logger");
+
+const log = createLogger("socket");
 
 const sessions = {}; // sessionName -> Session instance
 const socketSessions = {}; // socket.id -> sessionName, so cellClicked knows which board to use
@@ -30,8 +33,13 @@ const setupSocket = (server) => {
     const session = sessions[sessionName];
     if (!session || session.getGame().gameOver || session.getActivePlayerCount() < 2) return;
 
+    const currentTurn = session.getCurrentPlayerName();
+    log.debug(`Timer started for ${sessionName}`, {
+      currentTurn,
+      durationMs: TURN_DURATION_MS,
+    });
     io.to(sessionName).emit("turnTimer", {
-      currentTurn: session.getCurrentPlayerName(),
+      currentTurn,
       duration: TURN_DURATION_MS,
     });
 
@@ -41,6 +49,9 @@ const setupSocket = (server) => {
 
       const skippedPlayer = s.getCurrentPlayerName();
       s.updatePlayerTurn();
+      log.info(`Turn timed out in ${sessionName}: ${skippedPlayer} skipped`, {
+        nextTurn: s.getCurrentPlayerName(),
+      });
 
       io.to(sessionName).emit("turnSkipped", {
         skippedPlayer,
@@ -55,11 +66,12 @@ const setupSocket = (server) => {
     if (sessionTimers[sessionName]) {
       clearTimeout(sessionTimers[sessionName]);
       delete sessionTimers[sessionName];
+      log.debug(`Timer cleared for ${sessionName}`);
     }
   }
 
   io.on("connection", (socket) => {
-    console.log(`🔗 User connected: ${socket.id}`);
+    log.info(`User connected: ${socket.id}`, { totalUsers: connectedUsers.size + 1 });
     connectedUsers.add(socket.id);
     io.emit("userCount", connectedUsers.size);
 
@@ -67,16 +79,22 @@ const setupSocket = (server) => {
       const sessionName = socketSessions[socket.id];
       const session = sessions[sessionName];
       if (!session) {
+        log.warn(`cellClicked with no session`, { socket: socket.id });
         socket.emit("error", "Join or create a session before playing.");
         return;
       }
 
       const game = session.getGame();
       if (game.gameOver) {
+        log.debug(`cellClicked after game over in ${sessionName}`, { socket: socket.id });
         socket.emit("error", "The game has already ended.");
         return;
       }
       if (!session.isCurrentPlayerTurn(socket.id)) {
+        log.debug(`Out-of-turn click in ${sessionName}`, {
+          socket: socket.id,
+          expected: session.getCurrentPlayerName(),
+        });
         socket.emit("error", "It's not your turn.");
         return;
       }
@@ -86,6 +104,7 @@ const setupSocket = (server) => {
       io.to(sessionName).emit("turnPaused");
 
       const player = session.getCurrentPlayerName();
+      log.info(`Move in ${sessionName}: ${player} clicked (${r},${c})`);
       const applied = game.handleMove(
         r,
         c,
@@ -94,6 +113,10 @@ const setupSocket = (server) => {
         () => ({ currentTurn: session.getCurrentPlayerName() }),
         ({ truncated }) => {
           if (truncated) {
+            log.error(`Move voided in ${sessionName} (cascade truncated)`, {
+              player,
+              cell: [r, c],
+            });
             socket.emit(
               "error",
               "That move caused an unresolvable chain reaction and was voided."
@@ -120,6 +143,7 @@ const setupSocket = (server) => {
           });
 
           if (winner) {
+            log.info(`Game over in ${sessionName} — winner: ${winner}`);
             io.to(sessionName).emit("gameOver", { winner });
           } else {
             startTurnTimer(sessionName);
@@ -128,6 +152,10 @@ const setupSocket = (server) => {
       );
 
       if (!applied) {
+        log.warn(`Move not applied in ${sessionName}`, {
+          player,
+          cell: [r, c],
+        });
         socket.emit("error", "Invalid move.");
       }
     });
@@ -153,7 +181,7 @@ const setupSocket = (server) => {
         currentTurn: session.getCurrentPlayerName(),
       });
       startTurnTimer(sessionName);
-      console.log(`🔄 Session ${sessionName} restarted by ${socket.id}`);
+      log.info(`Session ${sessionName} restarted by ${socket.id}`);
     });
 
     socket.on("createSession", (sessionName) => {
@@ -184,7 +212,10 @@ const setupSocket = (server) => {
         currentTurn: session.getCurrentPlayerName(),
       });
       io.to(sessionName).emit("playerJoined", session.getPlayerLabels());
-      console.log(`🎮 Session created: ${sessionName}`);
+      log.info(`Session created: ${sessionName}`, {
+        by: socket.id,
+        assigned: myPlayer ?? "spectator",
+      });
     });
 
     socket.on("joinSession", (sessionName) => {
@@ -219,7 +250,10 @@ const setupSocket = (server) => {
       if (session.getActivePlayerCount() === 2 && !session.getGame().gameOver) {
         startTurnTimer(sessionName);
       }
-      console.log(`👤 User ${socket.id} joined session ${sessionName}`);
+      log.info(`User ${socket.id} joined session ${sessionName}`, {
+        assigned: myPlayer ?? "spectator",
+        activePlayers: session.getActivePlayerCount(),
+      });
     });
 
     socket.on("leaveSession", (sessionName) => {
@@ -231,12 +265,12 @@ const setupSocket = (server) => {
       delete socketSessions[socket.id];
 
       io.to(sessionName).emit("playerLeft", session.getPlayerLabels());
-      console.log(`🚪 User ${socket.id} left session ${sessionName}`);
+      log.info(`User ${socket.id} left session ${sessionName}`);
 
       if (session.isEmpty()) {
         clearTurnTimer(sessionName);
         delete sessions[sessionName];
-        console.log(`🗑️ Session removed (empty): ${sessionName}`);
+        log.info(`Session removed (empty): ${sessionName}`);
       } else if (session.getActivePlayerCount() < 2) {
         clearTurnTimer(sessionName);
       } else {
@@ -248,7 +282,7 @@ const setupSocket = (server) => {
     socket.on("disconnect", () => {
       connectedUsers.delete(socket.id);
       io.emit("userCount", connectedUsers.size);
-      console.log(`❌ User disconnected: ${socket.id}`);
+      log.info(`User disconnected: ${socket.id}`, { totalUsers: connectedUsers.size });
 
       const sessionName = socketSessions[socket.id];
       delete socketSessions[socket.id];
@@ -263,7 +297,7 @@ const setupSocket = (server) => {
       if (session.isEmpty()) {
         clearTurnTimer(sessionName);
         delete sessions[sessionName];
-        console.log(`🗑️ Session removed (empty): ${sessionName}`);
+        log.info(`Session removed (empty): ${sessionName}`);
       } else if (session.getActivePlayerCount() < 2) {
         clearTurnTimer(sessionName);
       } else {
