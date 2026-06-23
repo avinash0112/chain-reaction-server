@@ -1,8 +1,10 @@
 const Game = require("./Game");
+const { createLogger } = require("../utils/logger");
 
 class Session {
   constructor(sessionName, gridSize) {
     this.sessionName = sessionName;
+    this.log = createLogger(`session:${sessionName}`);
     // Maps socket.id -> stable label ("P0", "P1", ...).
     // Using a Map instead of an array means labels are assigned once and
     // never change when another player leaves — the old array approach
@@ -19,6 +21,7 @@ class Session {
 
   addPlayer(socketId) {
     if (this.playerMap.size >= Game.MAX_PLAYERS) {
+      this.log.info(`Session full — ${socketId} joins as spectator`);
       return false; // full — caller should treat this socket as a spectator
     }
     // Assign the lowest free slot label so slots stay compact (P0, P1, …)
@@ -29,11 +32,15 @@ class Session {
     const label = `P${slot}`;
     this.playerMap.set(socketId, label);
     this.turnOrder.push(socketId);
+    this.log.info(`Player ${label} added (${socketId})`, {
+      activePlayers: this.turnOrder.length,
+    });
     return true;
   }
 
   removePlayer(socketId) {
     if (!this.playerMap.has(socketId)) return;
+    const label = this.playerMap.get(socketId);
     this.playerMap.delete(socketId);
     const idx = this.turnOrder.indexOf(socketId);
     if (idx !== -1) {
@@ -48,6 +55,9 @@ class Session {
         this.currentPlayerTurn = 0;
       }
     }
+    this.log.info(`Player ${label} removed (${socketId})`, {
+      activePlayers: this.turnOrder.length,
+    });
   }
 
   isEmpty() {
@@ -72,8 +82,10 @@ class Session {
 
   updatePlayerTurn() {
     if (this.turnOrder.length > 0) {
+      const from = this.getCurrentPlayerName();
       this.currentPlayerTurn =
         (this.currentPlayerTurn + 1) % this.turnOrder.length;
+      this.log.info(`Turn advanced: ${from} -> ${this.getCurrentPlayerName()}`);
     }
   }
 
@@ -97,6 +109,7 @@ class Session {
   reset() {
     this.game = new Game(this.game.gridSize, this.sessionName);
     this.currentPlayerTurn = 0;
+    this.log.info("Session reset — new game board");
   }
 }
 
