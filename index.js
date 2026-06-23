@@ -4,7 +4,7 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 const app = express();
 const server = http.createServer(app);
-const { handleGameStateUpdate } = require("./utils");
+const { handleGameStateUpdate, isValidMove, checkWinner } = require("./utils");
 
 const io = new Server(server, {
   cors: {
@@ -16,61 +16,212 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-const sessions = {}; // Object to store game sessions
 const connectedUsers = new Set();
 const GRID_SIZE = 6;
+const PLAYER_ORDER = ["P1", "P2"];
 
-let gameState = Array(GRID_SIZE)
-  .fill()
-  .map(() => Array(GRID_SIZE).fill({ count: 0, player: null }));
+const sessions = {}; // sessionName -> session state (see createSessionState)
+const socketSessions = {}; // socket.id -> sessionName, so we know which board a click belongs to
+
+function createEmptyGrid(size) {
+  return Array.from({ length: size }, () =>
+    Array.from({ length: size }, () => ({ count: 0, player: null }))
+  );
+}
+
+function createSessionState() {
+  return {
+    players: {}, // socket.id -> "P1" | "P2"
+    gameState: createEmptyGrid(GRID_SIZE),
+    currentTurn: "P1",
+    moveCount: 0,
+    gameOver: false,
+  };
+}
+
+function assignPlayerSlot(session, socketId) {
+  const taken = Object.values(session.players);
+  const freeSlot = PLAYER_ORDER.find((p) => !taken.includes(p));
+  if (freeSlot) {
+    session.players[socketId] = freeSlot;
+  }
+  return freeSlot || null; // null means this socket is a spectator
+}
+
+function broadcastSessionState(sessionName, session) {
+  io.to(sessionName).emit("gameUpdateByOther", {
+    grid: session.gameState,
+    currentTurn: session.currentTurn,
+  });
+}
 
 io.on("connection", (socket) => {
   console.log(`User connected: ${socket.id}`);
   connectedUsers.add(socket.id);
   io.emit("userCount", connectedUsers.size);
 
-  //send initial state of game when user conects
-  socket.emit("initialGameState", gameState);
-
   socket.on("cellClicked", (r, c) => {
-    const newState = handleGameStateUpdate(gameState, r, c);
-    gameState = newState;
-    io.emit("gameUpdateByOther", gameState);
+    const sessionName = socketSessions[socket.id];
+    const session = sessions[sessionName];
+
+    if (!session) {
+      socket.emit("error", "Join or create a session before playing.");
+      return;
+    }
+    if (session.gameOver) {
+      socket.emit("error", "The game has already ended.");
+      return;
+    }
+
+    const player = session.players[socket.id];
+    if (!player) {
+      socket.emit("error", "Spectators cannot make moves.");
+      return;
+    }
+    if (player !== session.currentTurn) {
+      socket.emit("error", "It's not your turn.");
+      return;
+    }
+    if (!isValidMove(session.gameState, r, c, player, GRID_SIZE)) {
+      socket.emit("error", "Invalid move.");
+      return;
+    }
+
+    const result = handleGameStateUpdate(
+      session.gameState,
+      r,
+      c,
+      player,
+      GRID_SIZE
+    );
+
+    if (result.truncated) {
+      // Cascade hit the safety cap — board state is unreliable. Void the
+      // move rather than acting on a possibly-corrupted grid.
+      socket.emit(
+        "error",
+        "That move caused an unresolvable chain reaction and was voided."
+      );
+      return;
+    }
+
+    session.gameState = result.grid;
+    session.moveCount += 1;
+
+    const winner = checkWinner(session.gameState, session.moveCount, Object.keys(session.players).length);
+    if (winner) {
+      session.gameOver = true;
+      broadcastSessionState(sessionName, session);
+      io.to(sessionName).emit("gameOver", { winner });
+      return;
+    }
+
+    session.currentTurn = session.currentTurn === "P1" ? "P2" : "P1";
+    broadcastSessionState(sessionName, session);
+  });
+
+  // Handle restarting the game (fresh board, same players/slots, new game)
+  socket.on("restartGame", () => {
+    const sessionName = socketSessions[socket.id];
+    const session = sessions[sessionName];
+
+    if (!session) {
+      socket.emit("error", "Join or create a session first.");
+      return;
+    }
+
+    const player = session.players[socket.id];
+    if (!player) {
+      socket.emit("error", "Spectators cannot restart the game.");
+      return;
+    }
+
+    session.gameState = createEmptyGrid(GRID_SIZE);
+    session.currentTurn = "P1";
+    session.moveCount = 0;
+    session.gameOver = false;
+
+    io.to(sessionName).emit("gameRestarted", {
+      grid: session.gameState,
+      currentTurn: session.currentTurn,
+    });
+    console.log(`Session ${sessionName} restarted by ${socket.id}`);
   });
 
   // Handle creating a new session
   socket.on("createSession", (sessionName) => {
+    if (socketSessions[socket.id]) {
+      socket.emit(
+        "error",
+        "Leave your current session before creating another."
+      );
+      return;
+    }
     if (sessions[sessionName]) {
       socket.emit("error", "Session name already exists.");
-    } else {
-      sessions[sessionName] = { players: [socket.id] };
-      socket.join(sessionName);
-      socket.emit("sessionCreated", sessionName);
-      console.log(`Session created: ${sessionName}`);
+      return;
     }
+
+    const session = createSessionState();
+    sessions[sessionName] = session;
+    socket.join(sessionName);
+    socketSessions[socket.id] = sessionName;
+
+    const myPlayer = assignPlayerSlot(session, socket.id);
+    socket.emit("sessionCreated", sessionName);
+    socket.emit("playerAssigned", myPlayer);
+    socket.emit("initialGameState", {
+      grid: session.gameState,
+      currentTurn: session.currentTurn,
+    });
+    console.log(`Session created: ${sessionName}`);
   });
 
   // Handle joining a session
   socket.on("joinSession", (sessionName) => {
-    if (sessions[sessionName]) {
-      sessions[sessionName].players.push(socket.id);
-      socket.join(sessionName);
-      io.to(sessionName).emit("playerJoined", sessions[sessionName].players);
-      console.log(`User ${socket.id} joined session ${sessionName}`);
-    } else {
-      socket.emit("error", "Session not found.");
+    if (socketSessions[socket.id]) {
+      socket.emit(
+        "error",
+        "Leave your current session before joining another."
+      );
+      return;
     }
+
+    const session = sessions[sessionName];
+    if (!session) {
+      socket.emit("error", "Session not found.");
+      return;
+    }
+
+    socket.join(sessionName);
+    socketSessions[socket.id] = sessionName;
+
+    const myPlayer = assignPlayerSlot(session, socket.id);
+    socket.emit("sessionJoined", sessionName);
+    socket.emit("playerAssigned", myPlayer); // null = spectator (P1 and P2 already taken)
+    socket.emit("initialGameState", {
+      grid: session.gameState,
+      currentTurn: session.currentTurn,
+    });
+    io.to(sessionName).emit("playerJoined", Object.values(session.players));
+    console.log(`User ${socket.id} joined session ${sessionName}`);
   });
 
   // Handle leaving a session
   socket.on("leaveSession", (sessionName) => {
-    if (sessions[sessionName]) {
-      sessions[sessionName].players = sessions[sessionName].players.filter(
-        (id) => id !== socket.id
-      );
-      socket.leave(sessionName);
-      io.to(sessionName).emit("playerLeft", sessions[sessionName].players);
-      console.log(`User ${socket.id} left session ${sessionName}`);
+    const session = sessions[sessionName];
+    if (!session) return;
+
+    delete session.players[socket.id];
+    socket.leave(sessionName);
+    delete socketSessions[socket.id];
+
+    io.to(sessionName).emit("playerLeft", Object.values(session.players));
+    console.log(`User ${socket.id} left session ${sessionName}`);
+
+    if (Object.keys(session.players).length === 0) {
+      delete sessions[sessionName];
+      console.log(`Session removed (empty): ${sessionName}`);
     }
   });
 
@@ -80,13 +231,19 @@ io.on("connection", (socket) => {
     io.emit("userCount", connectedUsers.size);
     console.log(`User disconnected: ${socket.id}`);
 
-    console.log("connectedUsers", connectedUsers);
+    const sessionName = socketSessions[socket.id];
+    delete socketSessions[socket.id];
+    if (!sessionName) return;
 
-    for (const sessionName in sessions) {
-      sessions[sessionName].players = sessions[sessionName].players.filter(
-        (id) => id !== socket.id
-      );
-      io.to(sessionName).emit("playerLeft", sessions[sessionName].players);
+    const session = sessions[sessionName];
+    if (!session) return;
+
+    delete session.players[socket.id];
+    io.to(sessionName).emit("playerLeft", Object.values(session.players));
+
+    if (Object.keys(session.players).length === 0) {
+      delete sessions[sessionName];
+      console.log(`Session removed (empty): ${sessionName}`);
     }
   });
 });
