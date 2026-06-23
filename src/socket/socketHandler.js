@@ -57,6 +57,13 @@ const setupSocket = (server) => {
               "error",
               "That move caused an unresolvable chain reaction and was voided."
             );
+            // The board has been rolled back server-side. Broadcast the
+            // restored state to ALL clients so nobody is left showing a
+            // corrupted mid-cascade board.
+            io.to(sessionName).emit("gameUpdateByOther", {
+              grid: game.board,
+              currentTurn: session.getCurrentPlayerName(),
+            });
             return;
           }
 
@@ -86,6 +93,28 @@ const setupSocket = (server) => {
       }
     });
 
+    socket.on("restartGame", () => {
+      const sessionName = socketSessions[socket.id];
+      const session = sessions[sessionName];
+
+      if (!session) {
+        socket.emit("error", "Join or create a session first.");
+        return;
+      }
+
+      if (!session.isPlayerInSession(socket.id)) {
+        socket.emit("error", "Spectators cannot restart the game.");
+        return;
+      }
+
+      session.reset();
+      io.to(sessionName).emit("gameRestarted", {
+        grid: session.getGame().board,
+        currentTurn: session.getCurrentPlayerName(),
+      });
+      console.log(`🔄 Session ${sessionName} restarted by ${socket.id}`);
+    });
+
     socket.on("createSession", (sessionName) => {
       if (socketSessions[socket.id]) {
         socket.emit(
@@ -113,6 +142,7 @@ const setupSocket = (server) => {
         grid: session.getGame().board,
         currentTurn: session.getCurrentPlayerName(),
       });
+      io.to(sessionName).emit("playerJoined", session.getPlayerLabels());
       console.log(`🎮 Session created: ${sessionName}`);
     });
 

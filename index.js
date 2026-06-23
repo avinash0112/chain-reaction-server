@@ -108,7 +108,7 @@ io.on("connection", (socket) => {
     session.gameState = result.grid;
     session.moveCount += 1;
 
-    const winner = checkWinner(session.gameState, session.moveCount);
+    const winner = checkWinner(session.gameState, session.moveCount, Object.keys(session.players).length);
     if (winner) {
       session.gameOver = true;
       broadcastSessionState(sessionName, session);

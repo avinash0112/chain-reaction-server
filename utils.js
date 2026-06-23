@@ -90,10 +90,10 @@ function isValidMove(grid, row, col, player, gridSize) {
 }
 
 // Returns the winning player's label once only one player has any orbs
-// left on the board — but never before both players have had a turn,
+// left on the board — but never before every active player has had a turn,
 // since an empty/near-empty board would otherwise falsely look "won".
-function checkWinner(grid, totalMovesMade) {
-  if (totalMovesMade < 2) return null;
+function checkWinner(grid, totalMovesMade, playerCount = 2) {
+  if (totalMovesMade < playerCount) return null;
 
   const ownersInPlay = new Set();
   for (const row of grid) {

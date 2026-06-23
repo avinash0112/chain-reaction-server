@@ -3,39 +3,55 @@ const Game = require("./Game");
 class Session {
   constructor(sessionName, gridSize) {
     this.sessionName = sessionName;
-    this.players = []; // socket IDs; array index IS the positional label (P0, P1, ...)
+    // Maps socket.id -> stable label ("P0", "P1", ...).
+    // Using a Map instead of an array means labels are assigned once and
+    // never change when another player leaves — the old array approach
+    // shifted everyone down one slot on removal, desyncing their label
+    // from the orbs they already placed on the board.
+    this.playerMap = new Map();
+    // Ordered list of socket IDs — controls turn rotation independently
+    // of the label map so we can safely drop a player from turn order
+    // without renaming everyone else.
+    this.turnOrder = [];
     this.currentPlayerTurn = 0;
-    this.playerName = "P0";
-    this.game = new Game(gridSize, sessionName);
+    this.game = new Game(gridSize || 6, sessionName);
   }
 
-  // FIX (related to test-session hijack / spectators): previously this
-  // pushed every socket unconditionally, so turn rotation's modulo
-  // (`% players.length`) included anyone who ever connected — not just
-  // the intended players. Now capped at Game.MAX_PLAYERS; anyone beyond
-  // that is a spectator and never enters turn rotation.
   addPlayer(socketId) {
-    if (this.players.length >= Game.MAX_PLAYERS) {
+    if (this.playerMap.size >= Game.MAX_PLAYERS) {
       return false; // full — caller should treat this socket as a spectator
     }
-    this.players.push(socketId);
+    // Assign the lowest free slot label so slots stay compact (P0, P1, …)
+    // even when earlier players have left and their slot is now open.
+    const taken = new Set(this.playerMap.values());
+    let slot = 0;
+    while (taken.has(`P${slot}`)) slot++;
+    const label = `P${slot}`;
+    this.playerMap.set(socketId, label);
+    this.turnOrder.push(socketId);
     return true;
   }
 
   removePlayer(socketId) {
-    // NOTE (known limitation, kept as-is per minimal-patch scope): this
-    // shifts everyone after the removed player down one index, which
-    // changes their "P" label mid-game. A player's existing board cells
-    // still carry their OLD label, so leaving and rejoining mid-game can
-    // desync a player from their own prior moves. Fixing this properly
-    // would mean reworking the positional-label system itself, which is
-    // out of scope for this patch — flagging it rather than leaving it
-    // as a silent trap.
-    this.players = this.players.filter((id) => id !== socketId);
+    if (!this.playerMap.has(socketId)) return;
+    this.playerMap.delete(socketId);
+    const idx = this.turnOrder.indexOf(socketId);
+    if (idx !== -1) {
+      this.turnOrder.splice(idx, 1);
+      // Keep the turn pointer valid after the removal. If we removed the
+      // player whose turn it was (or one before them), clamp so the index
+      // still points at a real player.
+      if (this.turnOrder.length > 0) {
+        this.currentPlayerTurn =
+          this.currentPlayerTurn % this.turnOrder.length;
+      } else {
+        this.currentPlayerTurn = 0;
+      }
+    }
   }
 
   isEmpty() {
-    return this.players.length === 0;
+    return this.playerMap.size === 0;
   }
 
   getGame() {
@@ -43,36 +59,44 @@ class Session {
   }
 
   getActivePlayerCount() {
-    return this.players.length;
+    return this.turnOrder.length;
   }
 
   getPlayerLabel(socketId) {
-    const index = this.players.indexOf(socketId);
-    return index === -1 ? null : `P${index}`;
+    return this.playerMap.get(socketId) ?? null;
   }
 
   getPlayerLabels() {
-    return this.players.map((_, idx) => `P${idx}`);
+    return this.turnOrder.map((id) => this.playerMap.get(id));
   }
 
   updatePlayerTurn() {
-    if (this.players?.length) {
+    if (this.turnOrder.length > 0) {
       this.currentPlayerTurn =
-        (this.currentPlayerTurn + 1) % this.players.length;
-      this.playerName = `P${this.currentPlayerTurn}`;
+        (this.currentPlayerTurn + 1) % this.turnOrder.length;
     }
   }
 
-  isCurrentPlayerTurn(socId) {
-    return this.players[this.currentPlayerTurn] === socId;
+  isCurrentPlayerTurn(socketId) {
+    return this.turnOrder[this.currentPlayerTurn] === socketId;
   }
 
   getCurrentPlayer() {
-    return this.players[this.currentPlayerTurn];
+    return this.turnOrder[this.currentPlayerTurn];
   }
 
   getCurrentPlayerName() {
-    return this.playerName;
+    const id = this.getCurrentPlayer();
+    return id ? this.playerMap.get(id) : null;
+  }
+
+  isPlayerInSession(socketId) {
+    return this.playerMap.has(socketId);
+  }
+
+  reset() {
+    this.game = new Game(this.game.gridSize, this.sessionName);
+    this.currentPlayerTurn = 0;
   }
 }
 
