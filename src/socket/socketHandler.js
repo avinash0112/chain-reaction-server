@@ -5,6 +5,7 @@ const sessions = {}; // sessionName -> Session instance
 const socketSessions = {}; // socket.id -> sessionName, so cellClicked knows which board to use
 const connectedUsers = new Set();
 const GRID_SIZE = 6;
+const TURN_DURATION_MS = 30 * 1000;
 
 // FIX (test-session hijack): the old code force-enrolled every connecting
 // socket into one shared global "test" session before they'd clicked
@@ -20,6 +21,42 @@ const setupSocket = (server) => {
       methods: ["GET", "POST"],
     },
   });
+
+  // sessionName -> Node.js Timeout handle
+  const sessionTimers = {};
+
+  function startTurnTimer(sessionName) {
+    clearTurnTimer(sessionName);
+    const session = sessions[sessionName];
+    if (!session || session.getGame().gameOver || session.getActivePlayerCount() < 2) return;
+
+    io.to(sessionName).emit("turnTimer", {
+      currentTurn: session.getCurrentPlayerName(),
+      duration: TURN_DURATION_MS,
+    });
+
+    sessionTimers[sessionName] = setTimeout(() => {
+      const s = sessions[sessionName];
+      if (!s || s.getGame().gameOver) return;
+
+      const skippedPlayer = s.getCurrentPlayerName();
+      s.updatePlayerTurn();
+
+      io.to(sessionName).emit("turnSkipped", {
+        skippedPlayer,
+        currentTurn: s.getCurrentPlayerName(),
+      });
+
+      startTurnTimer(sessionName);
+    }, TURN_DURATION_MS);
+  }
+
+  function clearTurnTimer(sessionName) {
+    if (sessionTimers[sessionName]) {
+      clearTimeout(sessionTimers[sessionName]);
+      delete sessionTimers[sessionName];
+    }
+  }
 
   io.on("connection", (socket) => {
     console.log(`🔗 User connected: ${socket.id}`);
@@ -44,6 +81,10 @@ const setupSocket = (server) => {
         return;
       }
 
+      // Freeze the countdown while the move is being processed and animated.
+      clearTurnTimer(sessionName);
+      io.to(sessionName).emit("turnPaused");
+
       const player = session.getCurrentPlayerName();
       const applied = game.handleMove(
         r,
@@ -57,19 +98,15 @@ const setupSocket = (server) => {
               "error",
               "That move caused an unresolvable chain reaction and was voided."
             );
-            // The board has been rolled back server-side. Broadcast the
-            // restored state to ALL clients so nobody is left showing a
-            // corrupted mid-cascade board.
             io.to(sessionName).emit("gameUpdateByOther", {
               grid: game.board,
               currentTurn: session.getCurrentPlayerName(),
             });
+            // Move was voided — restart timer for the same player.
+            startTurnTimer(sessionName);
             return;
           }
 
-          // Runs once the full explosion cascade has settled — only then
-          // is the board final enough to check for a winner or hand off
-          // the turn.
           const winner = game.checkWinner(session.getActivePlayerCount());
           if (winner) {
             game.gameOver = true;
@@ -84,6 +121,8 @@ const setupSocket = (server) => {
 
           if (winner) {
             io.to(sessionName).emit("gameOver", { winner });
+          } else {
+            startTurnTimer(sessionName);
           }
         }
       );
@@ -108,10 +147,12 @@ const setupSocket = (server) => {
       }
 
       session.reset();
+      clearTurnTimer(sessionName);
       io.to(sessionName).emit("gameRestarted", {
         grid: session.getGame().board,
         currentTurn: session.getCurrentPlayerName(),
       });
+      startTurnTimer(sessionName);
       console.log(`🔄 Session ${sessionName} restarted by ${socket.id}`);
     });
 
@@ -174,6 +215,10 @@ const setupSocket = (server) => {
         currentTurn: session.getCurrentPlayerName(),
       });
       io.to(sessionName).emit("playerJoined", session.getPlayerLabels());
+      // Start the countdown when the second player arrives (game is now playable).
+      if (session.getActivePlayerCount() === 2 && !session.getGame().gameOver) {
+        startTurnTimer(sessionName);
+      }
       console.log(`👤 User ${socket.id} joined session ${sessionName}`);
     });
 
@@ -189,8 +234,14 @@ const setupSocket = (server) => {
       console.log(`🚪 User ${socket.id} left session ${sessionName}`);
 
       if (session.isEmpty()) {
+        clearTurnTimer(sessionName);
         delete sessions[sessionName];
         console.log(`🗑️ Session removed (empty): ${sessionName}`);
+      } else if (session.getActivePlayerCount() < 2) {
+        clearTurnTimer(sessionName);
+      } else {
+        // Remaining ≥2 players — restart with a fresh countdown for whoever is now current.
+        startTurnTimer(sessionName);
       }
     });
 
@@ -210,8 +261,13 @@ const setupSocket = (server) => {
       io.to(sessionName).emit("playerLeft", session.getPlayerLabels());
 
       if (session.isEmpty()) {
+        clearTurnTimer(sessionName);
         delete sessions[sessionName];
         console.log(`🗑️ Session removed (empty): ${sessionName}`);
+      } else if (session.getActivePlayerCount() < 2) {
+        clearTurnTimer(sessionName);
+      } else {
+        startTurnTimer(sessionName);
       }
     });
   });
