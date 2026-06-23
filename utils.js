@@ -1,150 +1,115 @@
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const cors = require("cors");
-const app = express();
-const server = http.createServer(app);
-const { handleGameStateUpdate, isValidMove, checkWinner } = require("./utils");
-
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
-});
-
-app.use(cors());
-app.use(express.json());
-
-const sessions = {}; // Object to store game sessions
-const connectedUsers = new Set();
-const GRID_SIZE = 6;
-
-function createEmptyGrid(size) {
-  return Array.from({ length: size }, () =>
-    Array.from({ length: size }, () => ({ count: 0, player: null }))
-  );
+// A cell's critical mass = its number of orthogonal neighbors
+// (2 for corners, 3 for edges, 4 for interior cells).
+function getCriticalMass(row, col, gridSize) {
+  let neighborCount = 0;
+  if (row > 0) neighborCount++;
+  if (row < gridSize - 1) neighborCount++;
+  if (col > 0) neighborCount++;
+  if (col < gridSize - 1) neighborCount++;
+  return neighborCount;
 }
 
-let gameState = createEmptyGrid(GRID_SIZE);
+function getNeighbors(row, col, gridSize) {
+  const neighbors = [];
+  if (row > 0) neighbors.push([row - 1, col]);
+  if (row < gridSize - 1) neighbors.push([row + 1, col]);
+  if (col > 0) neighbors.push([row, col - 1]);
+  if (col < gridSize - 1) neighbors.push([row, col + 1]);
+  return neighbors;
+}
 
-// Player-slot tracking: which two sockets are P1 / P2, and whose turn it is.
-// (Single shared game for now — this becomes per-session in the next change.)
-const players = {}; // socket.id -> "P1" | "P2"
-const PLAYER_ORDER = ["P1", "P2"];
-let currentTurn = "P1";
-let moveCount = 0;
-let gameOver = false;
+// Mutates `grid` in place: starting from the just-played cell, explodes any
+// cell that has reached its critical mass, distributing one orb to each
+// neighbor (capturing it for the exploding player), which can trigger
+// further explosions. Processed breadth-first via a queue so it never
+// recurses.
+//
+// SAFETY NOTE: explosions never destroy orbs, only redistribute them, and
+// the board has no "sink" cell that absorbs orbs permanently. This is the
+// classic chip-firing / abelian sandpile model, and termination is only
+// *guaranteed* while total orbs on the board stay below the number of
+// adjacency edges in the grid (60 for this 6x6 board). In real two-player
+// games that threshold is never approached before someone is eliminated,
+// but the cap below exists as a defensive backstop against a pathological
+// or adversarially-constructed sequence reaching it.
+function resolveExplosions(grid, startRow, startCol, gridSize) {
+  const queue = [[startRow, startCol]];
+  const maxIterations = gridSize * gridSize * 100;
+  let iterations = 0;
+  let truncated = false;
 
-function assignPlayerSlot(socketId) {
-  const taken = Object.values(players);
-  const freeSlot = PLAYER_ORDER.find((p) => !taken.includes(p));
-  if (freeSlot) {
-    players[socketId] = freeSlot;
+  while (queue.length > 0) {
+    if (++iterations > maxIterations) {
+      console.error("Explosion chain exceeded safety limit — aborting early.");
+      truncated = true;
+      break;
+    }
+
+    const [row, col] = queue.shift();
+    const cell = grid[row][col];
+    const criticalMass = getCriticalMass(row, col, gridSize);
+
+    if (cell.count < criticalMass) continue;
+
+    const explodingPlayer = cell.player;
+    cell.count = 0;
+    cell.player = null;
+
+    for (const [nRow, nCol] of getNeighbors(row, col, gridSize)) {
+      const neighbor = grid[nRow][nCol];
+      neighbor.count += 1;
+      neighbor.player = explodingPlayer;
+      queue.push([nRow, nCol]);
+    }
   }
-  return freeSlot || null; // null means this socket is a spectator
+
+  return { grid, truncated };
 }
 
-io.on("connection", (socket) => {
-  console.log(`User connected: ${socket.id}`);
-  connectedUsers.add(socket.id);
-  io.emit("userCount", connectedUsers.size);
+// Returns { grid, truncated }. `truncated: true` means the cascade hit the
+// safety cap and the returned grid is NOT a reliable stable state — the
+// caller should treat the move as failed/voided rather than act on it
+// (e.g. don't run a win-check against it), rather than trusting a board
+// that may have a cell still sitting above its own critical mass.
+function handleGameStateUpdate(prevGrid, row, col, player, gridSize) {
+  const newGrid = prevGrid.map((r) => r.map((cell) => ({ ...cell })));
+  newGrid[row][col].count += 1;
+  newGrid[row][col].player = player;
 
-  const myPlayer = assignPlayerSlot(socket.id);
-  socket.emit("playerAssigned", myPlayer); // null = spectator (P1 and P2 already taken)
+  return resolveExplosions(newGrid, row, col, gridSize);
+}
 
-  //send initial state of game when user conects
-  socket.emit("initialGameState", { grid: gameState, currentTurn });
+// A move is valid only on the board, and only on a cell that's empty
+// or already owned by the player making the move.
+function isValidMove(grid, row, col, player, gridSize) {
+  if (row < 0 || row >= gridSize || col < 0 || col >= gridSize) {
+    return false;
+  }
+  const cell = grid[row][col];
+  return cell.player === null || cell.player === player;
+}
 
-  socket.on("cellClicked", (r, c) => {
-    if (gameOver) {
-      socket.emit("error", "The game has already ended.");
-      return;
+// Returns the winning player's label once only one player has any orbs
+// left on the board — but never before both players have had a turn,
+// since an empty/near-empty board would otherwise falsely look "won".
+function checkWinner(grid, totalMovesMade) {
+  if (totalMovesMade < 2) return null;
+
+  const ownersInPlay = new Set();
+  for (const row of grid) {
+    for (const cell of row) {
+      if (cell.player !== null) {
+        ownersInPlay.add(cell.player);
+      }
     }
+  }
 
-    const player = players[socket.id];
+  return ownersInPlay.size === 1 ? [...ownersInPlay][0] : null;
+}
 
-    if (!player) {
-      socket.emit("error", "Spectators cannot make moves.");
-      return;
-    }
-    if (player !== currentTurn) {
-      socket.emit("error", "It's not your turn.");
-      return;
-    }
-    if (!isValidMove(gameState, r, c, player, GRID_SIZE)) {
-      socket.emit("error", "Invalid move.");
-      return;
-    }
-
-    gameState = handleGameStateUpdate(gameState, r, c, player, GRID_SIZE);
-    moveCount += 1;
-
-    const winner = checkWinner(gameState, moveCount);
-    if (winner) {
-      gameOver = true;
-      io.emit("gameUpdateByOther", { grid: gameState, currentTurn });
-      io.emit("gameOver", { winner });
-      return;
-    }
-
-    currentTurn = currentTurn === "P1" ? "P2" : "P1";
-    io.emit("gameUpdateByOther", { grid: gameState, currentTurn });
-  });
-
-  // Handle creating a new session
-  socket.on("createSession", (sessionName) => {
-    if (sessions[sessionName]) {
-      socket.emit("error", "Session name already exists.");
-    } else {
-      sessions[sessionName] = { players: [socket.id] };
-      socket.join(sessionName);
-      socket.emit("sessionCreated", sessionName);
-      console.log(`Session created: ${sessionName}`);
-    }
-  });
-
-  // Handle joining a session
-  socket.on("joinSession", (sessionName) => {
-    if (sessions[sessionName]) {
-      sessions[sessionName].players.push(socket.id);
-      socket.join(sessionName);
-      io.to(sessionName).emit("playerJoined", sessions[sessionName].players);
-      console.log(`User ${socket.id} joined session ${sessionName}`);
-    } else {
-      socket.emit("error", "Session not found.");
-    }
-  });
-
-  // Handle leaving a session
-  socket.on("leaveSession", (sessionName) => {
-    if (sessions[sessionName]) {
-      sessions[sessionName].players = sessions[sessionName].players.filter(
-        (id) => id !== socket.id
-      );
-      socket.leave(sessionName);
-      io.to(sessionName).emit("playerLeft", sessions[sessionName].players);
-      console.log(`User ${socket.id} left session ${sessionName}`);
-    }
-  });
-
-  // Handle disconnect
-  socket.on("disconnect", () => {
-    connectedUsers.delete(socket.id);
-    io.emit("userCount", connectedUsers.size);
-    console.log(`User disconnected: ${socket.id}`);
-
-    delete players[socket.id];
-
-    for (const sessionName in sessions) {
-      sessions[sessionName].players = sessions[sessionName].players.filter(
-        (id) => id !== socket.id
-      );
-      io.to(sessionName).emit("playerLeft", sessions[sessionName].players);
-    }
-  });
-});
-
-server.listen(3000, () => {
-  console.log("Server running on http://localhost:3000");
-});
+module.exports = {
+  handleGameStateUpdate,
+  isValidMove,
+  checkWinner,
+  getCriticalMass,
+};

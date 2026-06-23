@@ -87,13 +87,25 @@ io.on("connection", (socket) => {
       return;
     }
 
-    session.gameState = handleGameStateUpdate(
+    const result = handleGameStateUpdate(
       session.gameState,
       r,
       c,
       player,
       GRID_SIZE
     );
+
+    if (result.truncated) {
+      // Cascade hit the safety cap — board state is unreliable. Void the
+      // move rather than acting on a possibly-corrupted grid.
+      socket.emit(
+        "error",
+        "That move caused an unresolvable chain reaction and was voided."
+      );
+      return;
+    }
+
+    session.gameState = result.grid;
     session.moveCount += 1;
 
     const winner = checkWinner(session.gameState, session.moveCount);
@@ -185,12 +197,13 @@ io.on("connection", (socket) => {
     socketSessions[socket.id] = sessionName;
 
     const myPlayer = assignPlayerSlot(session, socket.id);
+    socket.emit("sessionJoined", sessionName);
     socket.emit("playerAssigned", myPlayer); // null = spectator (P1 and P2 already taken)
     socket.emit("initialGameState", {
       grid: session.gameState,
       currentTurn: session.currentTurn,
     });
-    io.to(sessionName).emit("playerJoined", Object.keys(session.players));
+    io.to(sessionName).emit("playerJoined", Object.values(session.players));
     console.log(`User ${socket.id} joined session ${sessionName}`);
   });
 
@@ -203,7 +216,7 @@ io.on("connection", (socket) => {
     socket.leave(sessionName);
     delete socketSessions[socket.id];
 
-    io.to(sessionName).emit("playerLeft", Object.keys(session.players));
+    io.to(sessionName).emit("playerLeft", Object.values(session.players));
     console.log(`User ${socket.id} left session ${sessionName}`);
 
     if (Object.keys(session.players).length === 0) {
@@ -226,7 +239,7 @@ io.on("connection", (socket) => {
     if (!session) return;
 
     delete session.players[socket.id];
-    io.to(sessionName).emit("playerLeft", Object.keys(session.players));
+    io.to(sessionName).emit("playerLeft", Object.values(session.players));
 
     if (Object.keys(session.players).length === 0) {
       delete sessions[sessionName];
