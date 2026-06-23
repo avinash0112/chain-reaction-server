@@ -49,13 +49,14 @@ class Game {
     this.moveCount++;
 
     const frames = [];
-    // Cap counts EXPLOSION EVENTS, not individual orb placements.
-    // Each addOrb call is not a step — only an actual cell explosion is.
-    // On a 6×6 board the chip-firing model guarantees termination while
-    // total orbs stay below 60 (the edge count). Normal games end well
-    // before that. This cap is a backstop for data corruption only —
-    // it should never fire during real gameplay.
-    const MAX_EXPLOSIONS = 10000;
+    // Iterative DFS via an explicit stack instead of recursive calls.
+    // The recursive approach hit JavaScript's call-stack limit on boards
+    // with many orbs (late-game cascades can require tens of thousands of
+    // firing events — well within the chip-firing bound of O(chips × n²)
+    // for a 6×6 grid — yet far beyond the ~10k default JS stack depth).
+    // With an explicit stack there is no call-stack limit; the cap below
+    // is a true last-resort backstop against pathological data corruption.
+    const MAX_EXPLOSIONS = 1_000_000;
     let explosions = 0;
     let truncated = false;
 
@@ -70,56 +71,48 @@ class Game {
           nr >= 0 && nr < this.gridSize && nc >= 0 && nc < this.gridSize
       );
 
-    // Places one orb on (r,c) for the given player, then immediately
-    // explodes the cell if it hits capacity. "Immediately" is the key
-    // word: the old BFS queue deferred explosions, which meant a cell
-    // could receive orbs from multiple queued neighbours before being
-    // processed — letting count climb above capacity and silently
-    // discarding the extra orbs when the explosion finally ran.
-    // Here the explosion is triggered synchronously inside this call,
-    // before any other addOrb call for ANY cell can proceed, so a
-    // cell's count is reset to 0 the instant it reaches capacity.
-    // count can therefore never exceed capacity.
-    const addOrb = (r, c, ep) => {
-      if (truncated) return;
-      this.board[r][c].count++;
-      this.board[r][c].player = ep;
-      if (this.board[r][c].count >= this.board[r][c].capacity) {
-        explodeCell(r, c);
-      }
-    };
+    // Place the initial orb.
+    this.board[row][col].count++;
+    this.board[row][col].player = player;
 
-    // Resets the cell and distributes one orb to each neighbour via
-    // addOrb. Because addOrb is recursive, each neighbour's own
-    // explosion (if triggered) fully resolves before the next neighbour
-    // receives its orb. A snapshot is captured after all of this cell's
-    // recursive subtree has settled, so the frame shows a stable partial
-    // board state that is always self-consistent (no cell above capacity).
-    const explodeCell = (r, c) => {
-      if (truncated) return;
+    // Seed the stack if the placed orb already hits capacity.
+    const explodeStack = [];
+    if (this.board[row][col].count >= this.board[row][col].capacity) {
+      explodeStack.push([row, col]);
+    }
+
+    while (explodeStack.length > 0) {
+      const [r, c] = explodeStack.pop();
+
+      // A cell may have been pushed more than once (two different
+      // neighbors firing into it) but then reduced below capacity by
+      // an intermediate explosion — skip it.
+      if (this.board[r][c].count < this.board[r][c].capacity) continue;
+
       if (++explosions > MAX_EXPLOSIONS) {
         console.error(
-          `Session "${this.sessionName}": cascade exceeded ${MAX_EXPLOSIONS} explosions — board data is corrupt.`
+          `Session "${this.sessionName}": cascade exceeded ${MAX_EXPLOSIONS} explosions.`
         );
         truncated = true;
-        return;
+        break;
       }
+
       const ep = this.board[r][c].player;
       this.board[r][c] = { ...this.board[r][c], count: 0, player: null };
 
       for (const [nr, nc] of neighbors(r, c)) {
-        addOrb(nr, nc, ep);
+        this.board[nr][nc].count++;
+        this.board[nr][nc].player = ep;
+        if (this.board[nr][nc].count >= this.board[nr][nc].capacity) {
+          explodeStack.push([nr, nc]);
+        }
       }
 
       frames.push({
         board: this.board.map((row) => row.map((cell) => ({ ...cell }))),
-        explodedAt: [r, c],
+        explodedAt: [r, c, ep],
       });
-    };
-
-    // Kick off the cascade. If the placed orb reaches capacity,
-    // addOrb calls explodeCell which recurses until the board is stable.
-    addOrb(row, col, player);
+    }
 
     if (truncated) {
       this.board = boardSnapshot;
@@ -128,22 +121,40 @@ class Game {
       return true;
     }
 
-    // Phase 2: stream the pre-computed frames to clients with an
-    // animation delay so each explosion is visible.
-    const FRAME_DELAY_MS = 500;
+    // Phase 2: stream a capped selection of frames so that even a cascade
+    // of thousands of explosions doesn't make the next player wait forever.
+    // We always include the very last frame so clients see the stable board.
+    const MAX_ANIM_FRAMES = 30;
+    let animFrames;
+    if (frames.length <= MAX_ANIM_FRAMES) {
+      animFrames = frames;
+    } else {
+      // Pick indices evenly spread across the cascade, always ending on
+      // the last frame (the stable board).
+      const step = Math.floor(frames.length / (MAX_ANIM_FRAMES - 1));
+      animFrames = [];
+      for (let i = 0; i < frames.length - 1; i += step) {
+        if (animFrames.length >= MAX_ANIM_FRAMES - 1) break;
+        animFrames.push(frames[i]);
+      }
+      animFrames.push(frames[frames.length - 1]);
+    }
+
+    const FRAME_DELAY_MS = 400;
     const streamFrames = (index) => {
-      if (index >= frames.length) {
+      if (index >= animFrames.length) {
         if (onSettled) onSettled({ truncated: false });
         return;
       }
       io.to(this.sessionName).emit("gameUpdateByOther", {
-        grid: frames[index].board,
+        grid: animFrames[index].board,
+        explodedAt: animFrames[index].explodedAt,
         ...(getExtraPayload ? getExtraPayload() : {}),
       });
       setTimeout(() => streamFrames(index + 1), FRAME_DELAY_MS);
     };
 
-    if (frames.length === 0) {
+    if (animFrames.length === 0) {
       if (onSettled) onSettled({ truncated: false });
     } else {
       streamFrames(0);
