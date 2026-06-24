@@ -18,6 +18,18 @@ test("assigns compact labels P0, P1, ... and caps at 4 players", () => {
   assert.equal(s.getActivePlayerCount(), 4);
 });
 
+test("getPlayers returns labels with display names; missing name falls back to label", () => {
+  const s = new Session("names", 6);
+  s.addPlayer("a", "Alice");
+  s.addPlayer("b", "  Bob  "); // trimmed
+  s.addPlayer("c"); // no name -> falls back to label
+  assert.deepEqual(s.getPlayers(), [
+    { label: "P0", name: "Alice" },
+    { label: "P1", name: "Bob" },
+    { label: "P2", name: "P2" },
+  ]);
+});
+
 test("labels stay stable when a middle player leaves", () => {
   const s = new Session("stable", 6);
   s.addPlayer("a"); // P0

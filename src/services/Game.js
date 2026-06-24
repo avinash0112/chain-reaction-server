@@ -87,13 +87,6 @@ class Game {
     // there is no call-stack concern; the generation cap below is just a
     // last-resort backstop against pathological data corruption.
     const MAX_GENERATIONS = 10_000;
-    // Once the game is decided we keep firing only to tidy the board (no cell
-    // left at/over capacity). That cleanup is strictly bounded and NEVER voids
-    // the move: a chip-firing board can hold so many orbs that no stable state
-    // exists, so we cannot always reach a clean board — we just try for a few
-    // waves and accept whatever remains.
-    const MAX_POSTWIN_WAVES = 40;
-    let postWinWaves = 0;
     let generation = 0;
     let explosions = 0;
     let truncated = false;
@@ -111,16 +104,6 @@ class Game {
         if (cell.player !== null) ownersBeforeMove.add(cell.player);
       }
     }
-
-    // The largest total number of orbs the board can hold while still having a
-    // stable configuration: sum of (capacity - 1) over every cell (84 on 6×6).
-    // Above this, NO arrangement is stable, so a winning cascade can never
-    // settle and must be halted unsettled; at or below it, the cascade will
-    // always reach a clean stable board.
-    const maxStableTotal = this.board.reduce(
-      (sum, r) => sum + r.reduce((s, cell) => s + (cell.capacity - 1), 0),
-      0
-    );
 
     // True only when exactly one player still owns orbs on the board.
     const hasSingleOwner = () => {
@@ -166,16 +149,7 @@ class Game {
       }
       if (exploding.length === 0) break; // board is stable
 
-      if (gameWon) {
-        // Post-win cleanup only: bounded, and it must never void the result.
-        if (postWinWaves >= MAX_POSTWIN_WAVES) {
-          mlog.info(
-            `Stopped post-win cleanup after ${postWinWaves} wave(s); board left unsettled`
-          );
-          break;
-        }
-        postWinWaves++;
-      } else if (++generation > MAX_GENERATIONS) {
+      if (++generation > MAX_GENERATIONS) {
         mlog.error(
           `Cascade exceeded ${MAX_GENERATIONS} waves — voiding move`,
           { explosions }
@@ -218,28 +192,17 @@ class Game {
       );
 
       // If this move started with an opponent on the board and the cascade has
-      // now reduced it to a single owner, the game is won. We still want to
-      // leave a CLEAN board (no cell left at/over capacity), so we keep firing
-      // the remaining waves until it stabilises — which is guaranteed as long
-      // as the total is within the stable bound. Only a genuinely super-critical
-      // board (above the bound) can never settle; there we stop immediately and
-      // accept the unsettled board, since continuing would loop forever.
+      // now reduced it to a single owner, the game is won. Break immediately:
+      // the client renders the winner announcement and caps displayed orb counts
+      // to capacity-1 visually, so the board always looks clean at game over.
+      // Attempting further parallel cleanup here causes period-2 cycles for the
+      // typical end-game (totalOrbs ≥ numEdges), so we just stop.
       if (!gameWon && ownersBeforeMove.size >= 2 && hasSingleOwner()) {
         gameWon = true;
         let totalOrbs = 0;
         for (const r of this.board) for (const cell of r) totalOrbs += cell.count;
-        if (totalOrbs > maxStableTotal) {
-          // No stable board can exist above the bound — don't even try to settle.
-          mlog.info(
-            `Win after wave ${generation}; board super-critical (${totalOrbs} orbs) — halting unsettled`
-          );
-          break;
-        }
-        mlog.info(
-          `Win after wave ${generation}; cleaning up for up to ${MAX_POSTWIN_WAVES} more wave(s)`
-        );
-        // fall through: keep firing (bounded) until the board settles or the
-        // post-win wave budget is spent.
+        mlog.info(`Win after wave ${generation} (${totalOrbs} orbs on board)`);
+        break;
       }
     }
 
@@ -251,7 +214,7 @@ class Game {
     }
 
     mlog.info(
-      `${gameWon ? "Won" : "Settled"} after ${frames.length} wave(s), ${explosions} explosion(s)`,
+      `${gameWon ? "Won" : "Settled"} in ${frames.length} wave(s), ${explosions} explosion(s)`,
       { after: summarizeBoard(this.board) }
     );
 
@@ -269,6 +232,13 @@ class Game {
 
     if (result.truncated) {
       if (onSettled) onSettled({ truncated: true });
+      return true;
+    }
+
+    // Game won — skip animation entirely. The client hides the board on gameOver,
+    // so there is nothing useful to animate.
+    if (result.gameWon) {
+      if (onSettled) onSettled({ truncated: false });
       return true;
     }
 
