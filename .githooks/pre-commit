@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run the test suite before every commit. A failing test blocks the commit.
+# Enabled via `git config core.hooksPath .githooks` (the npm "prepare" script
+# wires this up automatically on `npm install`).
+
+echo "pre-commit: running test suite..."
+npm test --silent
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "pre-commit: tests failed — commit aborted. (use 'git commit --no-verify' to bypass)"
+fi
+exit "$status"
