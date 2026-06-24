@@ -235,13 +235,6 @@ class Game {
       return true;
     }
 
-    // Game won — skip animation entirely. The client hides the board on gameOver,
-    // so there is nothing useful to animate.
-    if (result.gameWon) {
-      if (onSettled) onSettled({ truncated: false });
-      return true;
-    }
-
     const { frames } = result;
 
     // Stream a capped selection of frames so that even a cascade of thousands

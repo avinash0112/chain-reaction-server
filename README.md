@@ -131,7 +131,6 @@ See **[TESTING.md](TESTING.md)** for the full testing guide.
 | `sessionCreated` / `sessionJoined` | `sessionId` | Room create/join confirmed (the id used in the share link). |
 | `playerAssigned` | `"P0"…"P3"` or `null` | Your label (`null` = spectator). |
 | `playerJoined` / `playerLeft` | `[{ label, name }]` | Current players in the room — engine label + chosen display name. |
-| `userCount` | `number` | Total connected users. |
 | `initialGameState` | `{ grid, currentTurn }` | Board state on join. |
 | `gameUpdateByOther` | `{ grid, currentTurn?, explodedAt? }` | A board update / one explosion wave. `explodedAt` is the list of cells `[row, col, owner]` that burst this wave. |
 | `turnTimer` | `{ currentTurn, duration }` | Start of a turn's countdown. |

@@ -6,7 +6,6 @@ const log = createLogger("socket");
 
 const sessions = {}; // sessionName -> Session instance
 const socketSessions = {}; // socket.id -> sessionName, so cellClicked knows which board to use
-const connectedUsers = new Set();
 const GRID_SIZE = 6;
 const MAX_NAME_LENGTH = 20;
 // Per-turn countdown. Configurable via env so tests can use a short turn
@@ -88,9 +87,7 @@ const setupSocket = (server) => {
   }
 
   io.on("connection", (socket) => {
-    log.info(`User connected: ${socket.id}`, { totalUsers: connectedUsers.size + 1 });
-    connectedUsers.add(socket.id);
-    io.emit("userCount", connectedUsers.size);
+    log.info(`User connected: ${socket.id}`);
 
     socket.on("cellClicked", (r, c) => {
       const sessionName = socketSessions[socket.id];
@@ -296,6 +293,7 @@ const setupSocket = (server) => {
         log.info(`Session removed (empty): ${sessionName}`);
       } else if (session.getActivePlayerCount() < 2) {
         clearTurnTimer(sessionName);
+        io.to(sessionName).emit("turnPaused");
       } else {
         // Remaining ≥2 players — restart with a fresh countdown for whoever is now current.
         startTurnTimer(sessionName);
@@ -303,9 +301,7 @@ const setupSocket = (server) => {
     });
 
     socket.on("disconnect", () => {
-      connectedUsers.delete(socket.id);
-      io.emit("userCount", connectedUsers.size);
-      log.info(`User disconnected: ${socket.id}`, { totalUsers: connectedUsers.size });
+      log.info(`User disconnected: ${socket.id}`);
 
       const sessionName = socketSessions[socket.id];
       delete socketSessions[socket.id];
@@ -323,6 +319,7 @@ const setupSocket = (server) => {
         log.info(`Session removed (empty): ${sessionName}`);
       } else if (session.getActivePlayerCount() < 2) {
         clearTurnTimer(sessionName);
+        io.to(sessionName).emit("turnPaused");
       } else {
         startTurnTimer(sessionName);
       }
