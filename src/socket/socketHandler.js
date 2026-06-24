@@ -6,11 +6,25 @@ const log = createLogger("socket");
 
 const sessions = {}; // sessionName -> Session instance
 const socketSessions = {}; // socket.id -> sessionName, so cellClicked knows which board to use
-const connectedUsers = new Set();
 const GRID_SIZE = 6;
+const MAX_NAME_LENGTH = 20;
 // Per-turn countdown. Configurable via env so tests can use a short turn
 // instead of waiting the full 30 seconds for a timeout/skip.
 const TURN_DURATION_MS = Number(process.env.TURN_DURATION_MS) || 30 * 1000;
+
+// Short, URL-friendly, collision-free room id for shareable links.
+function generateSessionId() {
+  let id;
+  do {
+    id = Math.random().toString(36).slice(2, 8); // 6 base36 chars
+  } while (sessions[id]);
+  return id;
+}
+
+// Trim and cap a user-supplied display name; "" lets Session fall back to label.
+function cleanName(raw) {
+  return typeof raw === "string" ? raw.trim().slice(0, MAX_NAME_LENGTH) : "";
+}
 
 // FIX (test-session hijack): the old code force-enrolled every connecting
 // socket into one shared global "test" session before they'd clicked
@@ -73,9 +87,7 @@ const setupSocket = (server) => {
   }
 
   io.on("connection", (socket) => {
-    log.info(`User connected: ${socket.id}`, { totalUsers: connectedUsers.size + 1 });
-    connectedUsers.add(socket.id);
-    io.emit("userCount", connectedUsers.size);
+    log.info(`User connected: ${socket.id}`);
 
     socket.on("cellClicked", (r, c) => {
       const sessionName = socketSessions[socket.id];
@@ -186,7 +198,9 @@ const setupSocket = (server) => {
       log.info(`Session ${sessionName} restarted by ${socket.id}`);
     });
 
-    socket.on("createSession", (sessionName) => {
+    // Create a brand-new room with an auto-generated id (for shareable links).
+    // Payload: { playerName }.
+    socket.on("createSession", (payload = {}) => {
       if (socketSessions[socket.id]) {
         socket.emit(
           "error",
@@ -194,17 +208,15 @@ const setupSocket = (server) => {
         );
         return;
       }
-      if (sessions[sessionName]) {
-        socket.emit("error", "Session name already exists.");
-        return;
-      }
 
+      const playerName = cleanName(payload && payload.playerName);
+      const sessionName = generateSessionId();
       const session = new Session(sessionName, GRID_SIZE);
       sessions[sessionName] = session;
       socket.join(sessionName);
       socketSessions[socket.id] = sessionName;
 
-      const added = session.addPlayer(socket.id);
+      const added = session.addPlayer(socket.id, playerName);
       const myPlayer = added ? session.getPlayerLabel(socket.id) : null;
 
       socket.emit("sessionCreated", sessionName);
@@ -213,14 +225,16 @@ const setupSocket = (server) => {
         grid: session.getGame().board,
         currentTurn: session.getCurrentPlayerName(),
       });
-      io.to(sessionName).emit("playerJoined", session.getPlayerLabels());
+      io.to(sessionName).emit("playerJoined", session.getPlayers());
       log.info(`Session created: ${sessionName}`, {
         by: socket.id,
         assigned: myPlayer ?? "spectator",
       });
     });
 
-    socket.on("joinSession", (sessionName) => {
+    // Join an existing room (e.g. from a shareable link).
+    // Payload: { sessionId, playerName }.
+    socket.on("joinSession", (payload = {}) => {
       if (socketSessions[socket.id]) {
         socket.emit(
           "error",
@@ -229,16 +243,20 @@ const setupSocket = (server) => {
         return;
       }
 
+      const sessionName =
+        typeof payload === "string" ? payload : payload && payload.sessionId;
+      const playerName = cleanName(payload && payload.playerName);
+
       const session = sessions[sessionName];
       if (!session) {
-        socket.emit("error", "Session not found.");
+        socket.emit("error", "Game not found — check the link or code.");
         return;
       }
 
       socket.join(sessionName);
       socketSessions[socket.id] = sessionName;
 
-      const added = session.addPlayer(socket.id);
+      const added = session.addPlayer(socket.id, playerName);
       const myPlayer = added ? session.getPlayerLabel(socket.id) : null;
 
       socket.emit("sessionJoined", sessionName);
@@ -247,7 +265,7 @@ const setupSocket = (server) => {
         grid: session.getGame().board,
         currentTurn: session.getCurrentPlayerName(),
       });
-      io.to(sessionName).emit("playerJoined", session.getPlayerLabels());
+      io.to(sessionName).emit("playerJoined", session.getPlayers());
       // Start the countdown when the second player arrives (game is now playable).
       if (session.getActivePlayerCount() === 2 && !session.getGame().gameOver) {
         startTurnTimer(sessionName);
@@ -266,7 +284,7 @@ const setupSocket = (server) => {
       socket.leave(sessionName);
       delete socketSessions[socket.id];
 
-      io.to(sessionName).emit("playerLeft", session.getPlayerLabels());
+      io.to(sessionName).emit("playerLeft", session.getPlayers());
       log.info(`User ${socket.id} left session ${sessionName}`);
 
       if (session.isEmpty()) {
@@ -275,6 +293,7 @@ const setupSocket = (server) => {
         log.info(`Session removed (empty): ${sessionName}`);
       } else if (session.getActivePlayerCount() < 2) {
         clearTurnTimer(sessionName);
+        io.to(sessionName).emit("turnPaused");
       } else {
         // Remaining ≥2 players — restart with a fresh countdown for whoever is now current.
         startTurnTimer(sessionName);
@@ -282,9 +301,7 @@ const setupSocket = (server) => {
     });
 
     socket.on("disconnect", () => {
-      connectedUsers.delete(socket.id);
-      io.emit("userCount", connectedUsers.size);
-      log.info(`User disconnected: ${socket.id}`, { totalUsers: connectedUsers.size });
+      log.info(`User disconnected: ${socket.id}`);
 
       const sessionName = socketSessions[socket.id];
       delete socketSessions[socket.id];
@@ -294,7 +311,7 @@ const setupSocket = (server) => {
       if (!session) return;
 
       session.removePlayer(socket.id);
-      io.to(sessionName).emit("playerLeft", session.getPlayerLabels());
+      io.to(sessionName).emit("playerLeft", session.getPlayers());
 
       if (session.isEmpty()) {
         clearTurnTimer(sessionName);
@@ -302,6 +319,7 @@ const setupSocket = (server) => {
         log.info(`Session removed (empty): ${sessionName}`);
       } else if (session.getActivePlayerCount() < 2) {
         clearTurnTimer(sessionName);
+        io.to(sessionName).emit("turnPaused");
       } else {
         startTurnTimer(sessionName);
       }

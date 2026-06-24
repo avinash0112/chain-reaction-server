@@ -17,9 +17,13 @@ class Session {
     this.turnOrder = [];
     this.currentPlayerTurn = 0;
     this.game = new Game(gridSize || 6, sessionName);
+    // Maps socket.id -> chosen display name. The game engine stays label-based
+    // (board cells, turns and the winner are all labels like "P0"); names are
+    // purely for display, resolved label -> name on the client.
+    this.nameMap = new Map();
   }
 
-  addPlayer(socketId) {
+  addPlayer(socketId, name) {
     if (this.playerMap.size >= Game.MAX_PLAYERS) {
       this.log.info(`Session full — ${socketId} joins as spectator`);
       return false; // full — caller should treat this socket as a spectator
@@ -31,8 +35,11 @@ class Session {
     while (taken.has(`P${slot}`)) slot++;
     const label = `P${slot}`;
     this.playerMap.set(socketId, label);
+    // Fall back to the label as the name if none was provided.
+    const displayName = (name && String(name).trim()) || label;
+    this.nameMap.set(socketId, displayName);
     this.turnOrder.push(socketId);
-    this.log.info(`Player ${label} added (${socketId})`, {
+    this.log.info(`Player ${label} (${displayName}) added (${socketId})`, {
       activePlayers: this.turnOrder.length,
     });
     return true;
@@ -42,6 +49,7 @@ class Session {
     if (!this.playerMap.has(socketId)) return;
     const label = this.playerMap.get(socketId);
     this.playerMap.delete(socketId);
+    this.nameMap.delete(socketId);
     const idx = this.turnOrder.indexOf(socketId);
     if (idx !== -1) {
       this.turnOrder.splice(idx, 1);
@@ -78,6 +86,14 @@ class Session {
 
   getPlayerLabels() {
     return this.turnOrder.map((id) => this.playerMap.get(id));
+  }
+
+  // Rich player list for the UI: label (used by the engine) + display name.
+  getPlayers() {
+    return this.turnOrder.map((id) => ({
+      label: this.playerMap.get(id),
+      name: this.nameMap.get(id),
+    }));
   }
 
   updatePlayerTurn() {

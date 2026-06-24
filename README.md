@@ -118,9 +118,9 @@ See **[TESTING.md](TESTING.md)** for the full testing guide.
 
 | Event | Payload | Effect |
 | --- | --- | --- |
-| `createSession` | `sessionName` | Create a room and join as the first player. |
-| `joinSession` | `sessionName` | Join a room (as a player, or spectator if full). |
-| `leaveSession` | `sessionName` | Leave the current room. |
+| `createSession` | `{ playerName }` | Create a room with an **auto-generated id** and join as the first player. The id comes back via `sessionCreated` and is used to build a shareable link. |
+| `joinSession` | `{ sessionId, playerName }` | Join a room by id (e.g. from a shared link), as a player or spectator if full. |
+| `leaveSession` | `sessionId` | Leave the current room. |
 | `cellClicked` | `row, col` | Make a move (only on your turn). |
 | `restartGame` | — | Reset the current room's game. |
 
@@ -128,10 +128,9 @@ See **[TESTING.md](TESTING.md)** for the full testing guide.
 
 | Event | Payload | Meaning |
 | --- | --- | --- |
-| `sessionCreated` / `sessionJoined` | `sessionName` | Room create/join confirmed. |
+| `sessionCreated` / `sessionJoined` | `sessionId` | Room create/join confirmed (the id used in the share link). |
 | `playerAssigned` | `"P0"…"P3"` or `null` | Your label (`null` = spectator). |
-| `playerJoined` / `playerLeft` | `labels[]` | Current player labels in the room. |
-| `userCount` | `number` | Total connected users. |
+| `playerJoined` / `playerLeft` | `[{ label, name }]` | Current players in the room — engine label + chosen display name. |
 | `initialGameState` | `{ grid, currentTurn }` | Board state on join. |
 | `gameUpdateByOther` | `{ grid, currentTurn?, explodedAt? }` | A board update / one explosion wave. `explodedAt` is the list of cells `[row, col, owner]` that burst this wave. |
 | `turnTimer` | `{ currentTurn, duration }` | Start of a turn's countdown. |
