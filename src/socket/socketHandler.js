@@ -8,7 +8,9 @@ const sessions = {}; // sessionName -> Session instance
 const socketSessions = {}; // socket.id -> sessionName, so cellClicked knows which board to use
 const connectedUsers = new Set();
 const GRID_SIZE = 6;
-const TURN_DURATION_MS = 30 * 1000;
+// Per-turn countdown. Configurable via env so tests can use a short turn
+// instead of waiting the full 30 seconds for a timeout/skip.
+const TURN_DURATION_MS = Number(process.env.TURN_DURATION_MS) || 30 * 1000;
 
 // FIX (test-session hijack): the old code force-enrolled every connecting
 // socket into one shared global "test" session before they'd clicked
@@ -305,6 +307,9 @@ const setupSocket = (server) => {
       }
     });
   });
+
+  // Returned so callers (e.g. tests) can close the Socket.IO server cleanly.
+  return io;
 };
 
 module.exports = { setupSocket };

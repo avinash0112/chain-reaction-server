@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node ./src/server.js", 
+    "start": "node ./src/server.js",
     "dev": "nodemon ./src/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "test:coverage": "node --test --experimental-test-coverage",
+    "prepare": "git config core.hooksPath .githooks || exit 0"
   },
   "keywords": [],
   "author": "",

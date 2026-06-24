@@ -1,5 +1,9 @@
 const { createLogger, summarizeBoard } = require("../utils/logger");
 
+// Delay between streamed animation frames. Configurable via env so tests can
+// stream cascades quickly instead of waiting the full per-frame delay.
+const FRAME_DELAY_MS = Number(process.env.FRAME_DELAY_MS) || 400;
+
 class Game {
   static MAX_PLAYERS = 4;
 
@@ -43,13 +47,22 @@ class Game {
     return cell.player === null || cell.player === player;
   }
 
-  handleMove(row, col, player, io, getExtraPayload, onSettled) {
+  /**
+   * Pure, synchronous resolution of a move: places the orb, runs the entire
+   * wave-based cascade, mutates the board/moveCount, and returns metadata.
+   * No sockets, no timers — so it can be unit-tested directly. handleMove()
+   * wraps this with the async frame streaming for live play.
+   *
+   * @returns {{applied: boolean, truncated?: boolean, gameWon?: boolean,
+   *            frames?: Array, explosions?: number}}
+   */
+  resolveMove(row, col, player) {
     if (this.gameOver || !this.isValidMove(row, col, player)) {
       this.log.warn(
         `Rejected move by ${player} at (${row},${col})`,
         { gameOver: this.gameOver, validMove: this.isValidMove(row, col, player) }
       );
-      return false;
+      return { applied: false };
     }
 
     const boardSnapshot = this.board.map((r) => r.map((cell) => ({ ...cell })));
@@ -234,8 +247,7 @@ class Game {
       this.board = boardSnapshot;
       this.moveCount = moveCountSnapshot;
       mlog.warn("Move voided; board rolled back to pre-move snapshot");
-      if (onSettled) onSettled({ truncated: true });
-      return true;
+      return { applied: true, truncated: true, gameWon: false, frames: [], explosions };
     }
 
     mlog.info(
@@ -243,16 +255,33 @@ class Game {
       { after: summarizeBoard(this.board) }
     );
 
-    // Phase 2: stream a capped selection of frames so that even a cascade
-    // of thousands of explosions doesn't make the next player wait forever.
-    // We always include the very last frame so clients see the stable board.
+    return { applied: true, truncated: false, gameWon, frames, explosions };
+  }
+
+  /**
+   * Live-play entry point: resolves the move, then streams the cascade frames
+   * to the room one wave at a time. Returns false only when the move is
+   * rejected (so the caller can surface "Invalid move"), true otherwise.
+   */
+  handleMove(row, col, player, io, getExtraPayload, onSettled) {
+    const result = this.resolveMove(row, col, player);
+    if (!result.applied) return false;
+
+    if (result.truncated) {
+      if (onSettled) onSettled({ truncated: true });
+      return true;
+    }
+
+    const { frames } = result;
+
+    // Stream a capped selection of frames so that even a cascade of thousands
+    // of explosions doesn't make the next player wait forever. We always
+    // include the very last frame so clients see the stable board.
     const MAX_ANIM_FRAMES = 30;
     let animFrames;
     if (frames.length <= MAX_ANIM_FRAMES) {
       animFrames = frames;
     } else {
-      // Pick indices evenly spread across the cascade, always ending on
-      // the last frame (the stable board).
       const step = Math.floor(frames.length / (MAX_ANIM_FRAMES - 1));
       animFrames = [];
       for (let i = 0; i < frames.length - 1; i += step) {
@@ -260,15 +289,10 @@ class Game {
         animFrames.push(frames[i]);
       }
       animFrames.push(frames[frames.length - 1]);
-      mlog.debug(
-        `Downsampled ${frames.length} frames to ${animFrames.length} for animation`
-      );
     }
 
-    const FRAME_DELAY_MS = 400;
     const streamFrames = (index) => {
       if (index >= animFrames.length) {
-        mlog.debug(`Finished streaming ${animFrames.length} frame(s) to clients`);
         if (onSettled) onSettled({ truncated: false });
         return;
       }
